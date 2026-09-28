@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Unified Checkout</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        padding: 24px 16px;
+        display: flex;
+        align-items: flex-start;
+        justify-content: center;
+        background: #1c222c;
+        font-family: -apple-system, Roboto, sans-serif;
+      }
+      .wrap {
+        width: 100%;
+        max-width: 400px;
+        min-width: 0;
+      }
+      #checkout-container {
+        width: 100%;
+      }
+      .loading {
+        width: 100%;
+        padding: 40px 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+      }
+      .spinner {
+        width: 28px;
+        height: 28px;
+        border: 3px solid rgba(255, 255, 255, 0.2);
+        border-top-color: #ffffff;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      .loading-text {
+        color: #8b93a1;
+        font-size: 13px;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <!--
+    This page's job: receive a clientLibrary URL and a captureContextJwt
+    (handed to it by the app — see the message listener below, not the
+    page's own address, so the
+    pass never sits in a URL that could end up in navigation history or a
+    server's access logs), load that URL as a <script>, then drive the SDK
+    exactly the way CyberSource's own sample integration does:
+
+      const client   = await window.VAS.UnifiedCheckout(captureContextJwt)
+      const checkout = await client.createCheckout({ autoProcessing })
+      const result   = await checkout.mount('#checkout-container')
+
+    autoProcessing is derived from the JWT itself (true only if
+    ctx[0].data.completeMandate is present) — not a fixed setting. CP's real
+    captureContextJwt does include completeMandate, so autoProcessing is
+    expected to be true in production, meaning `result` above is the
+    completed transaction outcome, not a bare transientToken.
+
+    TODO: confirm the exact shape of `result` when autoProcessing is true
+    against real CyberSource data (only autoProcessing:false, a bare
+    transientToken string, has been confirmed so far — see
+    docs/enbd-integration-mobile.md, Known gaps). Until then this page
+    relays whatever `result` comes back, untouched, so it can be inspected.
+
+    window.VAS is whatever clientLibrary defines — right now that's
+    mock-client-library.js's own fake implementation of the same interface
+    (see that file). Once CP's mobile wrapper returns a real CyberSource
+    clientLibrary, nothing on this page changes — the real script just
+    defines the real window.VAS instead.
+  -->
+    <div class="wrap">
+      <div class="loading" id="loading">
+        <div class="spinner"></div>
+        <div class="loading-text">Loading secure checkout…</div>
+      </div>
+      <div id="checkout-container"></div>
+    </div>
+
+    <script>
+      function post(payload) {
+        if (window.ReactNativeWebView) {
+          window.ReactNativeWebView.postMessage(JSON.stringify(payload))
+        } else {
+          // Allows opening this page directly in a normal browser while
+          // building it, without an RN WebView host to post to.
+          console.log('postMessage', payload)
+        }
+      }
+
+      function hideLoading() {
+        var loading = document.getElementById('loading')
+        if (loading) {
+          loading.style.display = 'none'
+        }
+      }
+
+      // Same base64url decode CyberSource's own sample integration uses.
+      function parseJwt(token) {
+        var base64Url = token.split('.')[1]
+        var base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/')
+        var jsonPayload = decodeURIComponent(
+          atob(base64)
+            .split('')
+            .map(function (c) {
+              return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)
+            })
+            .join('')
+        )
+        return JSON.parse(jsonPayload)
+      }
+
+      // Script onload fires before window.VAS is actually populated —
+      // matches CyberSource's own sample, which polls for it after load.
+      function waitForVas() {
+        return new Promise(function (resolve, reject) {
+          var attempts = 0
+          var maxAttempts = 50 // 5s at 100ms
+          var interval = setInterval(function () {
+            attempts++
+            if (
+              window.VAS &&
+              typeof window.VAS.UnifiedCheckout === 'function'
+            ) {
+              clearInterval(interval)
+              resolve()
+            } else if (attempts >= maxAttempts) {
+              clearInterval(interval)
+              reject(
+                new Error(
+                  'VAS.UnifiedCheckout did not become available after loading clientLibrary'
+                )
+              )
+            }
+          }, 100)
+        })
+      }
+
+      function loadClientLibrary(url, integrity) {
+        return new Promise(function (resolve, reject) {
+          var script = document.createElement('script')
+          script.src = url
+          if (integrity) {
+            script.integrity = integrity
+            script.crossOrigin = 'anonymous'
+          }
+          script.onload = resolve
+          script.onerror = function () {
+            reject(new Error('Failed to load clientLibrary script'))
+          }
+          document.head.appendChild(script)
+        })
+      }
+
+      async function run(clientLibrary, captureContextJwt) {
+        if (!clientLibrary || !captureContextJwt) {
+          hideLoading()
+          post({
+            type: 'error',
+            message: 'Missing clientLibrary or captureContextJwt',
+          })
+          return
+        }
+
+        var jwtPayload
+        try {
+          jwtPayload = parseJwt(captureContextJwt)
+        } catch (err) {
+          hideLoading()
+          post({ type: 'error', message: 'Failed to parse captureContextJwt' })
+          return
+        }
+
+        var ctxData =
+          jwtPayload.ctx && jwtPayload.ctx[0] && jwtPayload.ctx[0].data
+        var clientLibraryIntegrity = ctxData && ctxData.clientLibraryIntegrity
+        var autoProcessing = !!(ctxData && ctxData.completeMandate)
+
+        try {
+          await loadClientLibrary(clientLibrary, clientLibraryIntegrity)
+          await waitForVas()
+
+          var client = await window.VAS.UnifiedCheckout(captureContextJwt)
+          var checkout = await client.createCheckout({
+            autoProcessing: autoProcessing,
+          })
+
+          // The widget draws its own UI into #checkout-container as soon as
+          // mount() is called, not only once its returned promise resolves —
+          // so the loading state comes off here, not after awaiting it.
+          hideLoading()
+          var result = await checkout.mount('#checkout-container')
+
+          // Relaying the raw result untouched — see the comment at the top
+          // of this file for why (autoProcessing's real shape isn't
+          // confirmed against the app's flow yet).
+          post({
+            type: 'result',
+            autoProcessing: autoProcessing,
+            result: result,
+          })
+        } catch (err) {
+          hideLoading()
+          post({
+            type: 'error',
+            message: (err && err.message) || 'Unknown Unified Checkout error',
+          })
+        }
+      }
+
+      // The app hands over clientLibrary/captureContextJwt as a message once
+      // this page has finished loading, rather than this page reading them
+      // from its own URL — keeps the pass out of any address that could end
+      // up in navigation history or a server's access logs. See RN's
+      // UnifiedCheckoutScreen.tsx for the sending side.
+      //
+      // Listening on both document and window: react-native-webview has a
+      // long-standing platform inconsistency here (older Android dispatches
+      // on document, iOS and modern Android on window) — this is its own
+      // documented workaround, not a guess.
+      var handoffReceived = false
+      function handleHandoffMessage(event) {
+        if (handoffReceived) return
+        var data
+        try {
+          data = JSON.parse(event.data)
+        } catch (err) {
+          return // Not our message — ignore rather than error.
+        }
+        if (!data || !data.clientLibrary || !data.captureContextJwt) return
+        handoffReceived = true
+        run(data.clientLibrary, data.captureContextJwt)
+      }
+      document.addEventListener('message', handleHandoffMessage)
+      window.addEventListener('message', handleHandoffMessage)
+    </script>
+  </body>
+</html>

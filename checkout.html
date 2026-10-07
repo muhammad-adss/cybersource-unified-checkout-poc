@@ -28,16 +28,8 @@
       }
       #checkout-container {
         width: 100%;
-      }
-      /* The widget draws its card-entry form inside an iframe it injects
-         itself — a plain <iframe> defaults to a fixed intrinsic size unless
-         told otherwise, so without this it can render wider than the
-         device's actual viewport. Only fixes the iframe's own box; if
-         content *inside* the iframe was laid out assuming a fixed width,
-         this alone may not be enough — see docs/enbd-integration-mobile.md. */
-      #checkout-container iframe {
-        max-width: 100% !important;
-        width: 100% !important;
+        /* Space above the payment method buttons (Card payment / wallets). */
+        margin-top: 32px;
       }
       .loading {
         width: 100%;

@@ -29,6 +29,16 @@
       #checkout-container {
         width: 100%;
       }
+      /* The widget draws its card-entry form inside an iframe it injects
+         itself — a plain <iframe> defaults to a fixed intrinsic size unless
+         told otherwise, so without this it can render wider than the
+         device's actual viewport. Only fixes the iframe's own box; if
+         content *inside* the iframe was laid out assuming a fixed width,
+         this alone may not be enough — see docs/enbd-integration-mobile.md. */
+      #checkout-container iframe {
+        max-width: 100% !important;
+        width: 100% !important;
+      }
       .loading {
         width: 100%;
         padding: 40px 0;
@@ -48,6 +58,23 @@
       .loading-text {
         color: #8b93a1;
         font-size: 13px;
+      }
+      /* Shown in place of the payment method buttons once a method is
+         selected (see watchPaymentMethodSelection). Centred over the whole
+         page, but transparent, never takes touches, and at the lowest layer,
+         so the payment screens Unified Checkout adds later in the page are
+         always drawn on top of it. */
+      .processing {
+        display: none;
+        position: fixed;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        left: 0;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+        z-index: 0;
       }
       @keyframes spin {
         to {
@@ -92,6 +119,9 @@
         <div class="spinner"></div>
         <div class="loading-text">Loading secure checkout…</div>
       </div>
+      <div class="processing" id="processing" aria-hidden="true">
+        <div class="spinner"></div>
+      </div>
       <div id="checkout-container"></div>
     </div>
 
@@ -110,6 +140,63 @@
         var loading = document.getElementById('loading')
         if (loading) {
           loading.style.display = 'none'
+        }
+      }
+
+      // Unified Checkout closes its payment screen before mount() resolves,
+      // which briefly showed the payment method buttons again before the
+      // app's result screen. So once a method is selected, the buttons are
+      // hidden behind a spinner until the user cancels or an error occurs.
+      //
+      // Fail-safe by design: it only reacts to Unified Checkout's own events
+      // (v1 checkout.on), so if they are unavailable the page behaves as
+      // before. It sends nothing to the app — released app versions treat
+      // any message other than 'error' as a payment result.
+      var PROCESSING_RESTORE_AFTER_INACTIVITY_MS = 2 * 60 * 1000
+      var isProcessing = false
+      var processingTimer = null
+
+      function setPaymentOptionsHidden(hidden) {
+        var container = document.getElementById('checkout-container')
+        var processing = document.getElementById('processing')
+        if (container) container.style.visibility = hidden ? 'hidden' : ''
+        if (processing) processing.style.display = hidden ? 'flex' : 'none'
+      }
+
+      // Safety net only: if the buttons stay hidden with no checkout activity
+      // at all (e.g. a missed cancel event), bring them back. Any checkout
+      // event, such as typing in the card form, restarts it.
+      function restartProcessingTimer() {
+        clearTimeout(processingTimer)
+        processingTimer = setTimeout(
+          hideProcessing,
+          PROCESSING_RESTORE_AFTER_INACTIVITY_MS
+        )
+      }
+
+      function showProcessing() {
+        isProcessing = true
+        setPaymentOptionsHidden(true)
+        restartProcessingTimer()
+      }
+
+      function hideProcessing() {
+        isProcessing = false
+        clearTimeout(processingTimer)
+        setPaymentOptionsHidden(false)
+      }
+
+      function watchPaymentMethodSelection(checkout) {
+        if (!checkout || typeof checkout.on !== 'function') return
+        try {
+          checkout.on('paymentMethodSelected', showProcessing)
+          checkout.on('paymentMethodCancelled', hideProcessing)
+          checkout.on('error', hideProcessing)
+          checkout.on('*', function () {
+            if (isProcessing) restartProcessingTimer()
+          })
+        } catch (err) {
+          // Never let this block the checkout itself.
         }
       }
 
@@ -202,6 +289,7 @@
           var checkout = await client.createCheckout({
             autoProcessing: autoProcessing,
           })
+          watchPaymentMethodSelection(checkout)
 
           // The widget draws its own UI into #checkout-container as soon as
           // mount() is called, not only once its returned promise resolves —
@@ -219,9 +307,18 @@
           })
         } catch (err) {
           hideLoading()
+          // `code` is a best-effort pass-through of whatever the thrown
+          // error carries, so the app can show a tailored message for a
+          // known failure (e.g. a 3DS/consumer-authentication failure)
+          // instead of only a generic one. NEITHER the property name
+          // ("code") NOR any specific value (e.g. "AUTHENTICATION_FAILED")
+          // is confirmed against real CyberSource behaviour — see
+          // docs/enbd-integration-mobile.md Known gaps. Relayed as-is,
+          // untouched, same as `result` above.
           post({
             type: 'error',
             message: (err && err.message) || 'Unknown Unified Checkout error',
+            code: err && err.code,
           })
         }
       }

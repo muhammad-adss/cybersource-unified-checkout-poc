@@ -28,8 +28,10 @@
       }
       #checkout-container {
         width: 100%;
-        /* Space above the payment method buttons (Card payment / wallets). */
-        margin-top: 32px;
+        /* Space above the payment method buttons (Card payment / wallets).
+           A % margin is relative to the container's width: ~31px on a
+           375px-wide phone, up to ~36px at the 400px max width. */
+        margin-top: 9%;
       }
       .loading {
         width: 100%;

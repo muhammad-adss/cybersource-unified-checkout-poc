@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Unified Checkout</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        padding: 24px 16px;
+        display: flex;
+        align-items: flex-start;
+        justify-content: center;
+        background: #1c222c;
+        font-family: -apple-system, Roboto, sans-serif;
+      }
+      .wrap {
+        width: 100%;
+        max-width: 400px;
+        min-width: 0;
+      }
+      #checkout-container {
+        width: 100%;
+        margin-top: 10%;
+      }
+      .loading {
+        width: 100%;
+        padding: 40px 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+      }
+      .spinner {
+        width: 28px;
+        height: 28px;
+        border: 3px solid rgba(255, 255, 255, 0.2);
+        border-top-color: #ffffff;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      .loading-text {
+        color: #8b93a1;
+        font-size: 13px;
+      }
+      /* Shown in place of the payment method buttons once a method is
+         selected (see watchPaymentMethodSelection). Centred over the whole
+         page, but transparent, never takes touches, and at the lowest layer,
+         so the payment screens Unified Checkout adds later in the page are
+         always drawn on top of it. */
+      .processing {
+        display: none;
+        position: fixed;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        left: 0;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+        z-index: 0;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      /* TEST ONLY: timing log for the 'mounted' event investigation. */
+      #timing-log {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        max-height: 40vh;
+        overflow-y: auto;
+        margin: 0;
+        padding: 6px 8px;
+        background: rgba(0, 0, 0, 0.85);
+        color: #7CFC9A;
+        font: 11px/1.4 Menlo, monospace;
+        z-index: 2147483647;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <!--
+    This page's job: receive a clientLibrary URL and a captureContextJwt
+    (handed to it by the app — see the message listener below, not the
+    page's own address, so the
+    pass never sits in a URL that could end up in navigation history or a
+    server's access logs), load that URL as a <script>, then drive the SDK
+    exactly the way CyberSource's own sample integration does:
+
+      const client   = await window.VAS.UnifiedCheckout(captureContextJwt)
+      const checkout = await client.createCheckout({ autoProcessing })
+      const result   = await checkout.mount('#checkout-container')
+
+    autoProcessing is derived from the JWT itself (true only if
+    ctx[0].data.completeMandate is present) — not a fixed setting. CP's real
+    captureContextJwt does include completeMandate, so autoProcessing is
+    expected to be true in production, meaning `result` above is the
+    completed transaction outcome, not a bare transientToken.
+
+    TODO: confirm the exact shape of `result` when autoProcessing is true
+    against real CyberSource data (only autoProcessing:false, a bare
+    transientToken string, has been confirmed so far — see
+    docs/enbd-integration-mobile.md, Known gaps). Until then this page
+    relays whatever `result` comes back, untouched, so it can be inspected.
+
+    window.VAS is whatever clientLibrary defines — right now that's
+    mock-client-library.js's own fake implementation of the same interface
+    (see that file). Once CP's mobile wrapper returns a real CyberSource
+    clientLibrary, nothing on this page changes — the real script just
+    defines the real window.VAS instead.
+  -->
+    <div class="wrap">
+      <div class="loading" id="loading">
+        <div class="spinner"></div>
+        <div class="loading-text">Loading secure checkout…</div>
+      </div>
+      <div class="processing" id="processing" aria-hidden="true">
+        <div class="spinner"></div>
+      </div>
+      <div id="checkout-container"></div>
+    </div>
+    <pre id="timing-log">TEST BUILD: timing log (waiting for handoff)</pre>
+
+    <script>
+      // TEST ONLY: on-screen timing log, in ms since the handoff arrived.
+      var timingStart = null
+      function logTiming(label) {
+        var t = timingStart === null ? 0 : Math.round(performance.now() - timingStart)
+        var line = '+' + t + 'ms  ' + label
+        var el = document.getElementById('timing-log')
+        if (el) el.textContent += '\n' + line
+        console.log('[timing]', line)
+      }
+      function watchContainer() {
+        var container = document.getElementById('checkout-container')
+        new MutationObserver(function (mutations) {
+          mutations.forEach(function (m) {
+            Array.prototype.forEach.call(m.addedNodes, function (node) {
+              if (node.nodeType !== 1) return
+              logTiming('container: added <' + node.tagName.toLowerCase() + '>')
+              var frames = node.tagName === 'IFRAME' ? [node] : node.querySelectorAll('iframe')
+              Array.prototype.forEach.call(frames, function (frame, i) {
+                frame.addEventListener('load', function () {
+                  logTiming('container iframe #' + i + ' load')
+                })
+              })
+            })
+          })
+        }).observe(container, { childList: true, subtree: true })
+      }
+
+      function post(payload) {
+        logTiming('post to app: ' + payload.type)
+        if (window.ReactNativeWebView) {
+          window.ReactNativeWebView.postMessage(JSON.stringify(payload))
+        } else {
+          // Allows opening this page directly in a normal browser while
+          // building it, without an RN WebView host to post to.
+          console.log('postMessage', payload)
+        }
+      }
+
+      function hideLoading() {
+        var loading = document.getElementById('loading')
+        if (loading) {
+          loading.style.display = 'none'
+        }
+      }
+
+      // Unified Checkout closes its payment screen before mount() resolves,
+      // which briefly showed the payment method buttons again before the
+      // app's result screen. So once a method is selected, the buttons are
+      // hidden behind a spinner until the user cancels or an error occurs.
+      //
+      // Fail-safe by design: it only reacts to Unified Checkout's own events
+      // (v1 checkout.on), so if they are unavailable the page behaves as
+      // before. It sends nothing to the app.
+      var PROCESSING_RESTORE_AFTER_INACTIVITY_MS = 2 * 60 * 1000
+      var isProcessing = false
+      var processingTimer = null
+
+      function setPaymentOptionsHidden(hidden) {
+        var container = document.getElementById('checkout-container')
+        var processing = document.getElementById('processing')
+        if (container) container.style.visibility = hidden ? 'hidden' : ''
+        if (processing) processing.style.display = hidden ? 'flex' : 'none'
+      }
+
+      // Safety net only: if the buttons stay hidden with no checkout activity
+      // at all (e.g. a missed cancel event), bring them back. Any checkout
+      // event, such as typing in the card form, restarts it.
+      function restartProcessingTimer() {
+        clearTimeout(processingTimer)
+        processingTimer = setTimeout(
+          hideProcessing,
+          PROCESSING_RESTORE_AFTER_INACTIVITY_MS
+        )
+      }
+
+      function showProcessing() {
+        isProcessing = true
+        setPaymentOptionsHidden(true)
+        restartProcessingTimer()
+      }
+
+      function hideProcessing() {
+        isProcessing = false
+        clearTimeout(processingTimer)
+        setPaymentOptionsHidden(false)
+      }
+
+      function watchPaymentMethodSelection(checkout) {
+        if (!checkout || typeof checkout.on !== 'function') return
+        try {
+          checkout.on('paymentMethodSelected', showProcessing)
+          checkout.on('paymentMethodCancelled', hideProcessing)
+          checkout.on('error', hideProcessing)
+          checkout.on('*', function () {
+            if (isProcessing) restartProcessingTimer()
+          })
+        } catch (err) {
+          // Never let this block the checkout itself.
+        }
+      }
+
+      // Same base64url decode CyberSource's own sample integration uses.
+      function parseJwt(token) {
+        var base64Url = token.split('.')[1]
+        var base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/')
+        var jsonPayload = decodeURIComponent(
+          atob(base64)
+            .split('')
+            .map(function (c) {
+              return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)
+            })
+            .join('')
+        )
+        return JSON.parse(jsonPayload)
+      }
+
+      // Script onload fires before window.VAS is actually populated —
+      // matches CyberSource's own sample, which polls for it after load.
+      function waitForVas() {
+        return new Promise(function (resolve, reject) {
+          var attempts = 0
+          var maxAttempts = 50 // 5s at 100ms
+          var interval = setInterval(function () {
+            attempts++
+            if (
+              window.VAS &&
+              typeof window.VAS.UnifiedCheckout === 'function'
+            ) {
+              clearInterval(interval)
+              resolve()
+            } else if (attempts >= maxAttempts) {
+              clearInterval(interval)
+              reject(
+                new Error(
+                  'VAS.UnifiedCheckout did not become available after loading clientLibrary'
+                )
+              )
+            }
+          }, 100)
+        })
+      }
+
+      function loadClientLibrary(url, integrity) {
+        return new Promise(function (resolve, reject) {
+          var script = document.createElement('script')
+          script.src = url
+          if (integrity) {
+            script.integrity = integrity
+            script.crossOrigin = 'anonymous'
+          }
+          script.onload = resolve
+          script.onerror = function () {
+            reject(new Error('Failed to load clientLibrary script'))
+          }
+          document.head.appendChild(script)
+        })
+      }
+
+      async function run(clientLibrary, captureContextJwt) {
+        if (!clientLibrary || !captureContextJwt) {
+          hideLoading()
+          post({
+            type: 'error',
+            message: 'Missing clientLibrary or captureContextJwt',
+          })
+          return
+        }
+
+        var jwtPayload
+        try {
+          jwtPayload = parseJwt(captureContextJwt)
+        } catch (err) {
+          hideLoading()
+          post({ type: 'error', message: 'Failed to parse captureContextJwt' })
+          return
+        }
+
+        var ctxData =
+          jwtPayload.ctx && jwtPayload.ctx[0] && jwtPayload.ctx[0].data
+        var clientLibraryIntegrity = ctxData && ctxData.clientLibraryIntegrity
+        var autoProcessing = !!(ctxData && ctxData.completeMandate)
+
+        try {
+          timingStart = performance.now()
+          logTiming('handoff received')
+          watchContainer()
+          await loadClientLibrary(clientLibrary, clientLibraryIntegrity)
+          logTiming('client library script loaded')
+          await waitForVas()
+          logTiming('window.VAS ready')
+
+          var client = await window.VAS.UnifiedCheckout(captureContextJwt)
+          var checkout = await client.createCheckout({
+            autoProcessing: autoProcessing,
+          })
+          logTiming('createCheckout resolved')
+          ;[
+            'mounted',
+            'ready',
+            'paymentMethodSelected',
+            'paymentMethodUpdate',
+            'paymentMethodCancelled',
+            'error',
+          ].forEach(function (name) {
+            try {
+              checkout.on(name, function (data) {
+                logTiming('EVENT ' + name + ' ' + JSON.stringify(data || null).slice(0, 80))
+              })
+            } catch (e) {
+              logTiming('on(' + name + ') failed: ' + e.message)
+            }
+          })
+          watchPaymentMethodSelection(checkout)
+
+          // The widget draws its own UI into #checkout-container as soon as
+          // mount() is called, not only once its returned promise resolves —
+          // so the loading state comes off here, not after awaiting it.
+          hideLoading()
+          logTiming('calling mount()')
+          var mounting = checkout.mount('#checkout-container')
+          logTiming('mount() returned (promise pending)')
+          // Tells the app loading is over, which stops its loading timeout.
+          // mount() only resolves once the payment is finished, so this must
+          // not wait for it.
+          post({ type: 'ready' })
+          var result = await mounting
+          logTiming('mount() resolved')
+
+          // Relaying the raw result untouched — see the comment at the top
+          // of this file for why (autoProcessing's real shape isn't
+          // confirmed against the app's flow yet).
+          post({
+            type: 'result',
+            autoProcessing: autoProcessing,
+            result: result,
+          })
+        } catch (err) {
+          hideLoading()
+          // `code` is a best-effort pass-through of whatever the thrown
+          // error carries, so the app can show a tailored message for a
+          // known failure (e.g. a 3DS/consumer-authentication failure)
+          // instead of only a generic one. NEITHER the property name
+          // ("code") NOR any specific value (e.g. "AUTHENTICATION_FAILED")
+          // is confirmed against real CyberSource behaviour — see
+          // docs/enbd-integration-mobile.md Known gaps. Relayed as-is,
+          // untouched, same as `result` above.
+          post({
+            type: 'error',
+            message: (err && err.message) || 'Unknown Unified Checkout error',
+            code: err && err.code,
+          })
+        }
+      }
+
+      // The app hands over clientLibrary/captureContextJwt as a message once
+      // this page has finished loading, rather than this page reading them
+      // from its own URL — keeps the pass out of any address that could end
+      // up in navigation history or a server's access logs. See RN's
+      // UnifiedCheckoutScreen.tsx for the sending side.
+      //
+      // Listening on both document and window: react-native-webview has a
+      // long-standing platform inconsistency here (older Android dispatches
+      // on document, iOS and modern Android on window) — this is its own
+      // documented workaround, not a guess.
+      var handoffReceived = false
+      function handleHandoffMessage(event) {
+        if (handoffReceived) return
+        var data
+        try {
+          data = JSON.parse(event.data)
+        } catch (err) {
+          return // Not our message — ignore rather than error.
+        }
+        if (!data || !data.clientLibrary || !data.captureContextJwt) return
+        handoffReceived = true
+        run(data.clientLibrary, data.captureContextJwt)
+      }
+      document.addEventListener('message', handleHandoffMessage)
+      window.addEventListener('message', handleHandoffMessage)
+    </script>
+  </body>
+</html>

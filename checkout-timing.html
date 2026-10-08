@@ -72,12 +72,17 @@
           transform: rotate(360deg);
         }
       }
-      /* TEST ONLY: timing log. */
+      /* TEST ONLY: timing log. Collapsed to one line; tap to expand. */
       #timing-log {
-        position: fixed; left: 0; right: 0; bottom: 0; max-height: 40vh;
-        overflow-y: auto; margin: 0; padding: 6px 8px;
-        background: rgba(0, 0, 0, 0.85); color: #7CFC9A;
-        font: 11px/1.4 Menlo, monospace; z-index: 2147483647; white-space: pre-wrap;
+        position: fixed; left: 6px; bottom: 6px; max-width: 70vw;
+        margin: 0; padding: 4px 8px; border-radius: 10px;
+        background: rgba(0, 0, 0, 0.8); color: #7CFC9A;
+        font: 10px/1.4 Menlo, monospace; z-index: 2147483647;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      #timing-log.open {
+        right: 6px; max-width: none; max-height: 45vh; overflow-y: auto;
+        white-space: pre-wrap;
       }
     </style>
   </head>
@@ -122,14 +127,22 @@
       </div>
       <div id="checkout-container"></div>
     </div>
-    <pre id="timing-log">TEST BUILD v2: ready on buttons iframe load</pre>
+    <pre id="timing-log" onclick="this.classList.toggle('open'); renderTimingLog()">v3 log (tap)</pre>
 
     <script>
       var timingStart = null
+      var timingLines = ['TEST BUILD v3: ready on buttons iframe load']
+      function renderTimingLog() {
+        var el = document.getElementById('timing-log')
+        if (!el) return
+        el.textContent = el.classList.contains('open')
+          ? timingLines.join('\n')
+          : timingLines[timingLines.length - 1] + '  (tap)'
+      }
       function logTiming(label) {
         var t = timingStart === null ? 0 : Math.round(performance.now() - timingStart)
-        var el = document.getElementById('timing-log')
-        if (el) el.textContent += '\n+' + t + 'ms  ' + label
+        timingLines.push('+' + t + 'ms  ' + label)
+        renderTimingLog()
       }
       function watchContainerForLog() {
         new MutationObserver(function (mutations) {
@@ -359,6 +372,13 @@
           // so the loading state comes off here, not after awaiting it.
           hideLoading()
           notifyReadyWhenButtonsLoad()
+          ;['paymentMethodSelected', 'paymentMethodCancelled', 'error'].forEach(function (name) {
+            try {
+              checkout.on(name, function (data) {
+                logTiming('EVENT ' + name + ' ' + JSON.stringify(data || null).slice(0, 120))
+              })
+            } catch (e) {}
+          })
           logTiming('calling mount()')
           var result = await checkout.mount('#checkout-container')
 

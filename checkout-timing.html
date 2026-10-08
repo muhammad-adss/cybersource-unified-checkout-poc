@@ -72,21 +72,12 @@
           transform: rotate(360deg);
         }
       }
-      /* TEST ONLY: timing log for the 'mounted' event investigation. */
+      /* TEST ONLY: timing log. */
       #timing-log {
-        position: fixed;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        max-height: 40vh;
-        overflow-y: auto;
-        margin: 0;
-        padding: 6px 8px;
-        background: rgba(0, 0, 0, 0.85);
-        color: #7CFC9A;
-        font: 11px/1.4 Menlo, monospace;
-        z-index: 2147483647;
-        white-space: pre-wrap;
+        position: fixed; left: 0; right: 0; bottom: 0; max-height: 40vh;
+        overflow-y: auto; margin: 0; padding: 6px 8px;
+        background: rgba(0, 0, 0, 0.85); color: #7CFC9A;
+        font: 11px/1.4 Menlo, monospace; z-index: 2147483647; white-space: pre-wrap;
       }
     </style>
   </head>
@@ -131,38 +122,29 @@
       </div>
       <div id="checkout-container"></div>
     </div>
-    <pre id="timing-log">TEST BUILD: timing log (waiting for handoff)</pre>
+    <pre id="timing-log">TEST BUILD v2: ready on buttons iframe load</pre>
 
     <script>
-      // TEST ONLY: on-screen timing log, in ms since the handoff arrived.
       var timingStart = null
       function logTiming(label) {
         var t = timingStart === null ? 0 : Math.round(performance.now() - timingStart)
-        var line = '+' + t + 'ms  ' + label
         var el = document.getElementById('timing-log')
-        if (el) el.textContent += '\n' + line
-        console.log('[timing]', line)
+        if (el) el.textContent += '\n+' + t + 'ms  ' + label
       }
-      function watchContainer() {
-        var container = document.getElementById('checkout-container')
+      function watchContainerForLog() {
         new MutationObserver(function (mutations) {
           mutations.forEach(function (m) {
             Array.prototype.forEach.call(m.addedNodes, function (node) {
               if (node.nodeType !== 1) return
               logTiming('container: added <' + node.tagName.toLowerCase() + '>')
-              var frames = node.tagName === 'IFRAME' ? [node] : node.querySelectorAll('iframe')
-              Array.prototype.forEach.call(frames, function (frame, i) {
-                frame.addEventListener('load', function () {
-                  logTiming('container iframe #' + i + ' load')
-                })
-              })
+              if (node.tagName === 'IFRAME') node.addEventListener('load', function () { logTiming('iframe load') })
             })
           })
-        }).observe(container, { childList: true, subtree: true })
+        }).observe(document.getElementById('checkout-container'), { childList: true })
       }
 
       function post(payload) {
-        logTiming('post to app: ' + payload.type)
+        logTiming('POST TO APP: ' + payload.type)
         if (window.ReactNativeWebView) {
           window.ReactNativeWebView.postMessage(JSON.stringify(payload))
         } else {
@@ -233,6 +215,48 @@
         } catch (err) {
           // Never let this block the checkout itself.
         }
+      }
+
+      // Tells the app the payment method buttons have loaded, which stops its
+      // loading timeout. Neither mount() nor Unified Checkout's 'mounted'
+      // event can be used: both happen as soon as mount() is called (seen on
+      // SIT), while the buttons load in an iframe Unified Checkout adds to
+      // #checkout-container — about 4s later on SIT. So 'ready' waits for
+      // that iframe's load event.
+      //
+      // Fail-safe: if the first content added isn't (or doesn't contain) an
+      // iframe, e.g. a future Unified Checkout version or the mock library,
+      // 'ready' is sent straight away, so the app never closes a checkout
+      // that is working; it only loses the timeout.
+      function notifyReadyWhenButtonsLoad() {
+        var container = document.getElementById('checkout-container')
+        if (!container || typeof MutationObserver !== 'function') return
+        var sent = false
+        var observer = new MutationObserver(function (mutations) {
+          for (var i = 0; i < mutations.length; i++) {
+            for (var j = 0; j < mutations[i].addedNodes.length; j++) {
+              var node = mutations[i].addedNodes[j]
+              if (node.nodeType !== 1) continue
+              // Only the first element decides: later ones (e.g. extra
+              // elements next to the iframe) must not send 'ready' early.
+              observer.disconnect()
+              var frame =
+                node.tagName === 'IFRAME' ? node : node.querySelector('iframe')
+              if (frame) {
+                frame.addEventListener('load', sendReady)
+              } else {
+                sendReady()
+              }
+              return
+            }
+          }
+        })
+        function sendReady() {
+          if (sent) return
+          sent = true
+          post({ type: 'ready' })
+        }
+        observer.observe(container, { childList: true })
       }
 
       // Same base64url decode CyberSource's own sample integration uses.
@@ -319,32 +343,14 @@
         try {
           timingStart = performance.now()
           logTiming('handoff received')
-          watchContainer()
+          watchContainerForLog()
           await loadClientLibrary(clientLibrary, clientLibraryIntegrity)
-          logTiming('client library script loaded')
+          logTiming('client library loaded')
           await waitForVas()
-          logTiming('window.VAS ready')
 
           var client = await window.VAS.UnifiedCheckout(captureContextJwt)
           var checkout = await client.createCheckout({
             autoProcessing: autoProcessing,
-          })
-          logTiming('createCheckout resolved')
-          ;[
-            'mounted',
-            'ready',
-            'paymentMethodSelected',
-            'paymentMethodUpdate',
-            'paymentMethodCancelled',
-            'error',
-          ].forEach(function (name) {
-            try {
-              checkout.on(name, function (data) {
-                logTiming('EVENT ' + name + ' ' + JSON.stringify(data || null).slice(0, 80))
-              })
-            } catch (e) {
-              logTiming('on(' + name + ') failed: ' + e.message)
-            }
           })
           watchPaymentMethodSelection(checkout)
 
@@ -352,15 +358,9 @@
           // mount() is called, not only once its returned promise resolves —
           // so the loading state comes off here, not after awaiting it.
           hideLoading()
+          notifyReadyWhenButtonsLoad()
           logTiming('calling mount()')
-          var mounting = checkout.mount('#checkout-container')
-          logTiming('mount() returned (promise pending)')
-          // Tells the app loading is over, which stops its loading timeout.
-          // mount() only resolves once the payment is finished, so this must
-          // not wait for it.
-          post({ type: 'ready' })
-          var result = await mounting
-          logTiming('mount() resolved')
+          var result = await checkout.mount('#checkout-container')
 
           // Relaying the raw result untouched — see the comment at the top
           // of this file for why (autoProcessing's real shape isn't

@@ -177,7 +177,7 @@
       }
 
       function watchPaymentMethodSelection(checkout) {
-        if (!checkout || typeof checkout.on !== 'function') return
+        if (true) return
         try {
           checkout.on('paymentMethodSelected1', showProcessing)
           checkout.on('paymentMethodCancelled', hideProcessing)

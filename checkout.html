@@ -35,9 +35,14 @@
         width: 100%;
         margin-top: 10%;
       }
-      /* Embedded mode: Unified Checkout's payment screen (card form). */
+      /* Embedded mode: Unified Checkout's payment screen (card form and
+         processing). Its frame is transparent and its text is dark, so it
+         needs a light background on this dark page. Empty (0 height) until a
+         payment method is selected, so the white box only shows with a form. */
       #payment-screen {
         width: 100%;
+        background: #ffffff;
+        border-radius: 8px;
       }
       .loading {
         width: 100%;

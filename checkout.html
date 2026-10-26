@@ -30,6 +30,10 @@
         width: 100%;
         margin-top: 10%;
       }
+      /* Embedded mode: Unified Checkout's payment screen (card form). */
+      #payment-screen {
+        width: 100%;
+      }
       .loading {
         width: 100%;
         padding: 40px 0;
@@ -114,6 +118,7 @@
         <div class="spinner"></div>
       </div>
       <div id="checkout-container"></div>
+      <div id="payment-screen"></div>
     </div>
 
     <script>
@@ -126,6 +131,118 @@
           console.log('postMessage', payload)
         }
       }
+
+      // ---- TEMP-EMBEDDED-TEST: debug logging (posted as type 'uc-debug') ----
+      var debugStart = Date.now()
+      function debugLog(msg, data) {
+        try {
+          post({ type: 'uc-debug', t: Date.now() - debugStart, msg: msg, data: data })
+        } catch (e) {}
+      }
+      // Names, types and keys only — never values (they may hold a token).
+      function describe(value) {
+        if (value === null || value === undefined) return String(value)
+        var type = typeof value
+        if (type === 'string') {
+          var looksLikeJwt = value.split('.').length === 3 && value.length > 100
+          return value.length <= 40 && !looksLikeJwt ? value : '<string len ' + value.length + '>'
+        }
+        if (type === 'number' || type === 'boolean') return String(value)
+        if (type === 'function') return '<function>'
+        try {
+          return '<object keys: ' + Object.keys(value).join(',') + '>'
+        } catch (e) {
+          return '<' + type + '>'
+        }
+      }
+      function describeArgs(args) {
+        var out = []
+        for (var i = 0; i < args.length; i++) out.push(describe(args[i]))
+        return out
+      }
+      function describeNode(node) {
+        if (!node || node.nodeType !== 1) return null
+        var src = node.getAttribute && node.getAttribute('src')
+        var srcPath
+        if (src) {
+          try {
+            var u = new URL(src, location.href)
+            srcPath = u.pathname.split('/').slice(-1)[0]
+          } catch (e) {}
+        }
+        var style = {}
+        var rect = {}
+        try {
+          var cs = getComputedStyle(node)
+          style = { display: cs.display, visibility: cs.visibility, position: cs.position, zIndex: cs.zIndex, bg: cs.backgroundColor }
+          var r = node.getBoundingClientRect()
+          rect = { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }
+        } catch (e) {}
+        var parent = node.parentElement
+        return {
+          tag: node.tagName,
+          id: node.id || undefined,
+          src: srcPath,
+          parent: parent ? (parent.id ? '#' + parent.id : parent.tagName) : undefined,
+          style: style,
+          rect: rect,
+        }
+      }
+      function viewport() {
+        var vv = window.visualViewport
+        return {
+          scale: vv ? Math.round(vv.scale * 100) / 100 : undefined,
+          scrollX: Math.round(window.scrollX),
+          scrollY: Math.round(window.scrollY),
+          innerW: window.innerWidth,
+          innerH: window.innerHeight,
+          docH: document.documentElement.scrollHeight,
+        }
+      }
+      window.addEventListener('error', function (e) {
+        debugLog('window error', { message: String(e.message).slice(0, 200) })
+      })
+      window.addEventListener('unhandledrejection', function (e) {
+        debugLog('unhandled rejection', describe(e.reason))
+      })
+      document.addEventListener('DOMContentLoaded', function () {
+        debugLog('page loaded (embedded test)', viewport())
+        new MutationObserver(function (mutations) {
+          mutations.forEach(function (m) {
+            if (m.type === 'childList') {
+              for (var i = 0; i < m.addedNodes.length; i++) {
+                var n = m.addedNodes[i]
+                if (n.nodeType !== 1 || /^(SCRIPT|STYLE|LINK)$/.test(n.tagName)) continue
+                debugLog('DOM added', describeNode(n))
+              }
+              for (var j = 0; j < m.removedNodes.length; j++) {
+                var r = m.removedNodes[j]
+                if (r.nodeType !== 1 || /^(SCRIPT|STYLE|LINK)$/.test(r.tagName)) continue
+                debugLog('DOM removed', { tag: r.tagName, id: r.id || undefined, from: m.target.id ? '#' + m.target.id : m.target.tagName })
+              }
+            } else if (m.type === 'attributes' && m.target.tagName !== 'HTML') {
+              debugLog('DOM ' + m.attributeName + ' changed', describeNode(m.target))
+            }
+          })
+        }).observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['style', 'class', 'hidden'],
+        })
+        if (window.visualViewport) {
+          var last = ''
+          window.visualViewport.addEventListener('resize', function () {
+            var v = viewport()
+            var key = v.scale + ':' + v.innerW
+            if (key !== last) {
+              last = key
+              debugLog('viewport changed (zoom/keyboard)', v)
+            }
+          })
+        }
+      })
+      // ---- end TEMP-EMBEDDED-TEST ----
 
       function hideLoading() {
         var loading = document.getElementById('loading')
@@ -176,10 +293,38 @@
         setPaymentOptionsHidden(false)
       }
 
+      // TEMP-EMBEDDED-TEST: false = our loader never hides the buttons, so the
+      // test shows only what Unified Checkout does in embedded mode.
+      var DEBUG_USE_PROCESSING = false
+
       function watchPaymentMethodSelection(checkout) {
-        if (true) return
+        debugLog('checkout object', {
+          typeofOn: typeof (checkout && checkout.on),
+          typeofMount: typeof (checkout && checkout.mount),
+        })
+        if (!checkout || typeof checkout.on !== 'function') return
+        ;[
+          'mounted',
+          'ready',
+          'unready',
+          'unmounted',
+          'paymentMethodSelected',
+          'paymentMethodCancelled',
+          'paymentMethodUpdate',
+          'error',
+          '*',
+        ].forEach(function (name) {
+          try {
+            checkout.on(name, function () {
+              debugLog('EVENT ' + name, describeArgs(arguments))
+            })
+          } catch (err) {
+            debugLog('checkout.on THREW for ' + name, String(err && err.message))
+          }
+        })
+        if (!DEBUG_USE_PROCESSING) return
         try {
-          checkout.on('paymentMethodSelected1', showProcessing)
+          checkout.on('paymentMethodSelected', showProcessing)
           checkout.on('paymentMethodCancelled', hideProcessing)
           checkout.on('error', hideProcessing)
           checkout.on('*', function () {
@@ -372,7 +517,17 @@
           // so the loading state comes off here, not after awaiting it.
           hideLoading()
           notifyReadyWhenButtonsLoad()
-          var result = await checkout.mount('#checkout-container')
+          // TEMP-EMBEDDED-TEST: embedded mode — buttons and payment screen in
+          // separate containers.
+          debugLog('mount (embedded)', {
+            paymentSelection: '#checkout-container',
+            paymentScreen: '#payment-screen',
+          })
+          var result = await checkout.mount({
+            paymentSelection: '#checkout-container',
+            paymentScreen: '#payment-screen',
+          })
+          debugLog('mount resolved', { resultType: typeof result })
 
           // Relaying the raw result untouched — see the comment at the top
           // of this file for why (autoProcessing's real shape isn't

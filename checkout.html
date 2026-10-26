@@ -38,11 +38,16 @@
       /* Embedded mode: Unified Checkout's payment screen (card form and
          processing). Its frame is transparent and its text is dark, so it
          needs a light background on this dark page. Empty (0 height) until a
-         payment method is selected, so the white box only shows with a form. */
+         payment method is selected, so the white box only shows with a form.
+         Unified Checkout's frame is inline, which reserves a ~20px text line
+         even while the frame is still 0 high; line-height/font-size 0 remove
+         it, so no empty white strip shows while the form loads. */
       #payment-screen {
         width: 100%;
         background: #ffffff;
         border-radius: 8px;
+        line-height: 0;
+        font-size: 0;
       }
       .loading {
         width: 100%;

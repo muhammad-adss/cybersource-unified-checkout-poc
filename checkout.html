@@ -2,7 +2,12 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- maximum-scale=1: stops iOS zooming the whole page when a card form
+         field is focused (the page then no longer fits the screen). -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1"
+    />
     <title>Unified Checkout</title>
     <style>
       :root {
@@ -155,9 +160,21 @@
           return '<' + type + '>'
         }
       }
+      function describePayload(value, depth) {
+        if (!value || typeof value !== 'object' || depth > 1) return describe(value)
+        var out = {}
+        try {
+          Object.keys(value).forEach(function (key) {
+            out[key] = describePayload(value[key], depth + 1)
+          })
+        } catch (e) {
+          return describe(value)
+        }
+        return out
+      }
       function describeArgs(args) {
         var out = []
-        for (var i = 0; i < args.length; i++) out.push(describe(args[i]))
+        for (var i = 0; i < args.length; i++) out.push(describePayload(args[i], 0))
         return out
       }
       function describeNode(node) {
@@ -206,7 +223,11 @@
         debugLog('unhandled rejection', describe(e.reason))
       })
       document.addEventListener('DOMContentLoaded', function () {
-        debugLog('page loaded (embedded test)', viewport())
+        debugLog('page loaded (embedded mode)', {
+          viewport: viewport(),
+          viewportMeta: (document.querySelector('meta[name=viewport]') || {}).content,
+          userAgent: navigator.userAgent,
+        })
         new MutationObserver(function (mutations) {
           mutations.forEach(function (m) {
             if (m.type === 'childList') {
@@ -316,7 +337,12 @@
         ].forEach(function (name) {
           try {
             checkout.on(name, function () {
-              debugLog('EVENT ' + name, describeArgs(arguments))
+              debugLog('EVENT ' + name, {
+                args: describeArgs(arguments),
+                viewport: viewport(),
+                buttons: describeNode(document.getElementById('checkout-container')),
+                paymentScreen: describeNode(document.getElementById('payment-screen')),
+              })
             })
           } catch (err) {
             debugLog('checkout.on THREW for ' + name, String(err && err.message))
@@ -527,7 +553,12 @@
             paymentSelection: '#checkout-container',
             paymentScreen: '#payment-screen',
           })
-          debugLog('mount resolved', { resultType: typeof result })
+          debugLog('mount resolved', {
+            resultType: typeof result,
+            resultKeys:
+              result && typeof result === 'object' ? Object.keys(result) : undefined,
+            viewport: viewport(),
+          })
 
           // Relaying the raw result untouched — see the comment at the top
           // of this file for why (autoProcessing's real shape isn't
